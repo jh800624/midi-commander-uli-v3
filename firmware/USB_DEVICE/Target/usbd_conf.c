@@ -29,6 +29,8 @@
 /* USER CODE BEGIN Includes */
 #include "ssd1306.h"
 #include "switch_router.h"
+#include "usbd_midi.h"
+#include "usbd_hid_custom.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -206,22 +208,14 @@ void HAL_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
 {
   /* Inform USB library that core enters in suspend Mode. */
   USBD_LL_Suspend((USBD_HandleTypeDef*)hpcd->pData);
-  /* Enter in STOP mode. */
   /* USER CODE BEGIN 2 */
-  // Turn off Display and LEDs, and block main loop updates
-  ssd1306_SetDisplayOn(0);
-  
-  // Explicitly disable JTAG again to ensure PB3 (LED_1) is GPIO
-  __HAL_RCC_AFIO_CLK_ENABLE();
-  __HAL_AFIO_REMAP_SWJ_NOJTAG();
-
-  setIsSuspended(1); // This turns off LEDs and sets flag
-
-  if (hpcd->Init.low_power_enable)
-  {
-    /* Set SLEEPDEEP bit and SleepOnExit of Cortex System Control Register. */
-    SCB->SCR |= (uint32_t)((uint32_t)(SCB_SCR_SLEEPDEEP_Msk | SCB_SCR_SLEEPONEXIT_Msk));
-  }
+  /* On this battery-powered board, loss of USB traffic can mean either host
+   * sleep or a physically removed cable. There is no verified VBUS-sense input
+   * to distinguish them. USB therefore becomes unavailable, but the product
+   * must remain a live standalone DIN controller. */
+  USBD_MIDI_NotifyLinkDown();
+  USBD_HID_NotifyLinkDown();
+  setIsSuspended(0);
   /* USER CODE END 2 */
 }
 
@@ -238,7 +232,7 @@ void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
   /* USER CODE BEGIN 3 */
-  // Restore state
+  /* USB has returned; the standalone application was never stopped. */
   setIsSuspended(0);
   ssd1306_SetDisplayOn(1);
   update_leds_on_bank_change();
@@ -287,6 +281,7 @@ static void PCD_ConnectCallback(PCD_HandleTypeDef *hpcd)
 void HAL_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
+  setIsSuspended(0);
   USBD_LL_DevConnected((USBD_HandleTypeDef*)hpcd->pData);
 }
 
@@ -301,6 +296,11 @@ static void PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
 void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
+  /* Some STM32F1 disconnect cases arrive only as Suspend, but handle an
+   * explicit disconnect identically: drop USB state, keep battery/DIN alive. */
+  USBD_MIDI_NotifyLinkDown();
+  USBD_HID_NotifyLinkDown();
+  setIsSuspended(0);
   USBD_LL_DevDisconnected((USBD_HandleTypeDef*)hpcd->pData);
 }
 
@@ -348,12 +348,13 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
   /* USER CODE BEGIN EndPoint_Configuration */
 
-  // Setup the PMA address areas for both control endpoints and the MIDI bulk endpoints
+  // Setup non-overlapping PMA areas for control, MIDI, and HID endpoints.
   HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x00 , PCD_SNG_BUF, 0x18);
   HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x80 , PCD_SNG_BUF, 0x58);
 
   HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x01 , PCD_SNG_BUF, (0x58 + 0x40));
   HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x81 , PCD_SNG_BUF, (0x58 + 0x40 + 0x40));
+  HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x82 , PCD_SNG_BUF, (0x58 + 0x40 + 0x40 + 0x40));
   /* USER CODE END EndPoint_Configuration */
   return USBD_OK;
 }

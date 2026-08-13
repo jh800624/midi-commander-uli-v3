@@ -24,14 +24,20 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "ssd1306.h"
+#include "tempo_clock.h"
 #include "ssd1306_tests.h"
 #include <stdbool.h>
+#include <stdio.h>
 #include "usbd_midi_if.h"
 #include "midi_defines.h"
 #include "midi_cmds.h"
 #include "switch_router.h"
 #include "display.h"
 #include "expression.h"
+#include "flash_midi_settings.h"
+#include "safety.h"
+#include "battery.h"
+#include "charge_diagnostic.h"
 
 /* USER CODE END Includes */
 
@@ -81,7 +87,11 @@ static void MX_ADC1_Init(void);
 /* USER CODE BEGIN 0 */
 static inline void RelocateVectorTable(void)
 {
+#ifdef USER_VECT_TAB_ADDRESS
   SCB->VTOR = FLASH_BASE | APP_VECT_TAB_OFFSET;
+#else
+  SCB->VTOR = FLASH_BASE;
+#endif
   __DSB();
   __ISB();
 }
@@ -103,6 +113,8 @@ int main(void)
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+  safety_boot_init();
+  safety_watchdog_init();
 
   /* USER CODE BEGIN Init */
 
@@ -124,34 +136,78 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Factory /CHG is the top-right switch, now physical key 5 (PB10).  Capture
+   * it before the splash delay so the user need only hold it during power-on. */
+  const uint8_t boot_charge_mode =
+      !HAL_GPIO_ReadPin(SW_5_GPIO_Port, SW_5_Pin);
+
   // Reset the USB interface in case it's still plugged in.
   HAL_GPIO_WritePin(USB_ID_GPIO_Port, USB_ID_Pin, GPIO_PIN_RESET);
 
-  display_init();
+  /* V3 settings use two CRC-protected slots in the unused part of the same
+   * external EEPROM as the factory firmware.  Internal program Flash is never
+   * erased for a settings save.  Load before OLED DMA begins so both devices
+   * cannot contend for I2C during startup. */
+  const uint8_t settings_persistent = v3_settings_init();
 
-  // Check we've got a 256kB device, in case Melo switch to a smaller device at some point
-  uint16_t flash_size = (*(uint16_t*)FLASHSIZE_BASE);
-  uint16_t min_size = 256;
-  if(flash_size < min_size) {
-	  char msg[25];
-	  sprintf(msg, "Mem %3dkb < %3dkb", flash_size, min_size);
-	  Error(msg);
-  }
+  display_init();
+  safety_watchdog_refresh();
+
+  if (boot_charge_mode) charge_mode_run();
 
   display_setConfigName();
 
+  if (!settings_persistent) {
+    ssd1306_Fill(Black);
+    ssd1306_SetCursor(2, 2);
+    ssd1306_WriteString("RAM SETTINGS", Font_6x8, White);
+    ssd1306_SetCursor(2, 12);
+    ssd1306_WriteString("EEPROM OFFLINE", Font_6x8, White);
+    ssd1306_UpdateScreen();
+    HAL_Delay(1200U);
+    safety_watchdog_refresh();
+  }
+
+  if (safety_telemetry_pending()) {
+    const safety_telemetry_t *crash = safety_telemetry_get();
+    char crash_text[20];
+    snprintf(crash_text, sizeof(crash_text), "Recovered E%lu",
+             (unsigned long)crash->fault);
+    ssd1306_Fill(Black);
+    ssd1306_SetCursor(2, 8);
+    ssd1306_WriteString(crash_text, Font_6x8, White);
+    ssd1306_UpdateScreen();
+    HAL_Delay(1200U);
+    safety_telemetry_clear();
+    safety_watchdog_refresh();
+  }
+
+  /* V3 layout is 1 2 3 4 5 / 6 7 8 9 0.  All ten remain assignable during
+   * performance; startup gestures are sampled before switch scanning begins. */
+  uint8_t boot_settings_mode = !HAL_GPIO_ReadPin(SW_E_GPIO_Port, SW_E_Pin); /* 0 */
+  if (!HAL_GPIO_ReadPin(SW_D_GPIO_Port, SW_D_Pin)) switch_current_page = 1; /* 9: CUS-2 */
+  else switch_current_page = 0; /* normal boot: CUS-1 */
+
   sw_led_init();
 
+  safety_watchdog_refresh();
   HAL_Delay(1000);
+  safety_watchdog_refresh();
   HAL_GPIO_WritePin(USB_ID_GPIO_Port, USB_ID_Pin, GPIO_PIN_SET);
 
   HAL_Delay(200);
+  safety_watchdog_refresh();
+  switch_router_sync_inputs();
   f_sys_config_complete = 1; // Don't scan switch changes until everything is init'd
-  display_setBankName(0);
+  display_setProfileName(switch_current_page);
+
+  if (boot_settings_mode) switch_router_set_settings_mode(1);
 
   // ADC DMA will be started in expression_task
 
   expression_init();
+  battery_init();
+  tempoClock_init();
 
   /* USER CODE END 2 */
 
@@ -160,7 +216,18 @@ int main(void)
   while (1)
   {
 	  handle_switches();
-      expression_task();
+	  if (!switch_router_is_suspended()) {
+	    /* Keep performance inputs quiet while the editor owns the switches. */
+	    if (!switch_router_is_settings_mode()) {
+          expression_task();
+	      tempoClock_task();
+	    }
+	    battery_task();
+	    display_task();
+	  }
+	  v3_settings_task();
+	  midiCmd_task();
+	  safety_watchdog_refresh();
 
     /* USER CODE END WHILE */
 
@@ -342,6 +409,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SW_B_GPIO_Port, &GPIO_InitStruct);
 
+  /* Factory charger interface: PC0 is status (pull-up), PC10 is an active-low
+   * open-drain enable.  Release PC10 high/off before making it an output. */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, GPIO_PIN_SET);
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* Other factory analog inputs include PC1 and PC5 (battery sense). */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /*Configure GPIO pins : SW_C_Pin SW_D_Pin SW_E_Pin SW_2_Pin
                            SW_1_Pin */
   GPIO_InitStruct.Pin = SW_C_Pin|SW_D_Pin|SW_E_Pin|SW_2_Pin
@@ -372,9 +459,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : EXP1_Pin EXP2_Pin */
+  /*Configure GPIO pins : USB supply sense, EXP1, EXP2 */
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   GPIO_InitStruct.Pin = EXP1_Pin;
   HAL_GPIO_Init(EXP1_GPIO_Port, &GPIO_InitStruct);
   GPIO_InitStruct.Pin = EXP2_Pin;
@@ -384,8 +473,6 @@ static void MX_GPIO_Init(void)
 
 static void MX_ADC1_Init(void)
 {
-  ADC_ChannelConfTypeDef sConfig = {0};
-
   hadc1.Instance = ADC1;
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE; // Disable scan
   hadc1.Init.ContinuousConvMode = DISABLE;
@@ -425,7 +512,7 @@ static void MX_ADC1_Init(void)
  * if the display is on, before calling Error_Handler() to stop all operations.
  */
 void Error(char *msg) {
-	if (ssd1306_GetDisplayOn() == 0) {
+		if (ssd1306_GetDisplayOn() != 0U) {
 		/* Display is on */
 		ssd1306_Fill(Black);
 		ssd1306_SetCursor(2, 0);
@@ -448,10 +535,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+  safety_record_fatal(SAFETY_FAULT_SOFTWARE);
   /* USER CODE END Error_Handler_Debug */
 }
 

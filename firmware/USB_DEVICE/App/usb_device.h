@@ -78,6 +78,10 @@
 /** USB Device initialization function. */
 void MX_USB_DEVICE_Init(void);
 
+/* True while a USB host has addressed/configured the MIDI device.  The board
+ * does not expose a separately verified digital VBUS pin to this firmware. */
+uint8_t usb_device_is_connected(void);
+
 /*
  * -- Insert functions declaration here --
  */

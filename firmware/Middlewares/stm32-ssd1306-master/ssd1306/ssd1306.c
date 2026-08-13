@@ -9,8 +9,20 @@ volatile uint8_t display_transmit_data_flag = 0; // non zero indicates the last 
 volatile uint8_t display_line_transmitting_flag = 0; // non zero indicates the line transfer has started, and a new transfer should not start until this is cleared.
 
 
-void ssd1306_DMATxLine(uint8_t line);
+static uint8_t ssd1306_DMATxLine(uint8_t line);
 uint8_t line_tx_buffer[SSD1306_WIDTH+6];
+
+#define SSD1306_I2C_READY_TIMEOUT_MS (10U)
+
+static uint8_t ssd1306_WaitI2CReady(void)
+{
+	uint32_t started = HAL_GetTick();
+	while (HAL_I2C_GetState(&SSD1306_I2C_PORT) != HAL_I2C_STATE_READY) {
+		if ((uint32_t)(HAL_GetTick() - started) >= SSD1306_I2C_READY_TIMEOUT_MS)
+			return 0U;
+	}
+	return 1U;
+}
 
 // Call this function periodically from the systick handler to handle loading the DMA with screen updates.
 // Note this must have a lower premption priority than the DMA callback priority (i.e. I higher number on the NVIC.)
@@ -22,10 +34,11 @@ void ssd1306_tick(void){
 	}
 
 	if(display_transmit_line != 0){
-		ssd1306_DMATxLine(display_transmit_line);
-		display_transmit_line++;
-		if(display_transmit_line > 7){
-			display_transmit_line = 0;
+		if (ssd1306_DMATxLine(display_transmit_line)) {
+			display_transmit_line++;
+			if(display_transmit_line > 7){
+				display_transmit_line = 0;
+			}
 		}
 	}
 }
@@ -42,14 +55,14 @@ void ssd1306_Reset(void) {
  */
 void ssd1306_WriteCommand(uint8_t byte)
 {
-	while(HAL_I2C_GetState(&SSD1306_I2C_PORT) != HAL_I2C_STATE_READY);
+	if (!ssd1306_WaitI2CReady()) return;
 	display_transmit_data_flag = 0;
 	HAL_I2C_Mem_Write_DMA(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1);
 }
 
 void ssd1306_WriteData(uint8_t* buffer, size_t buff_size)
 {
-	while(HAL_I2C_GetState(&SSD1306_I2C_PORT) != HAL_I2C_STATE_READY);
+	if (!ssd1306_WaitI2CReady()) return;
 	display_transmit_data_flag = 1;
 	HAL_I2C_Mem_Write_DMA(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size);
 }
@@ -63,6 +76,13 @@ void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c){
 		if(display_transmit_data_flag){
 			display_line_transmitting_flag = 0;
 		}
+	}
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+	if (hi2c->Instance == SSD1306_I2C_PORT.Instance) {
+		display_line_transmitting_flag = 0;
 	}
 }
 
@@ -164,8 +184,11 @@ void ssd1306_Fill(SSD1306_COLOR color) {
 }
 
 
-void ssd1306_DMATxLine(uint8_t line){
-	display_line_transmitting_flag = 1;
+static uint8_t ssd1306_DMATxLine(uint8_t line){
+	/* Called from SysTick: never wait here, because the tick used for a timeout
+	 * cannot advance while this handler is blocked. */
+	if (HAL_I2C_GetState(&SSD1306_I2C_PORT) != HAL_I2C_STATE_READY)
+		return 0U;
 
 	// Loading the front of the buffer with the page and column address commands
 	// So the commands get transfered by DMA in the one go with the page of data.
@@ -180,10 +203,14 @@ void ssd1306_DMATxLine(uint8_t line){
 
 	memcpy(line_tx_buffer + 6, &SSD1306_Buffer[SSD1306_WIDTH*line], SSD1306_WIDTH);
 
-	while(HAL_I2C_GetState(&SSD1306_I2C_PORT) != HAL_I2C_STATE_READY);
 	display_transmit_data_flag = 1;
-	HAL_I2C_Mem_Write_DMA(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x80, 1, line_tx_buffer, SSD1306_WIDTH+6);
-
+	display_line_transmitting_flag = 1;
+	if (HAL_I2C_Mem_Write_DMA(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x80, 1,
+			line_tx_buffer, SSD1306_WIDTH+6) != HAL_OK) {
+		display_line_transmitting_flag = 0;
+		return 0U;
+	}
+	return 1U;
 }
 
 // Write the screenbuffer with changed to the screen
@@ -195,13 +222,15 @@ void ssd1306_DMATxLine(uint8_t line){
 // is only started on systick 1ms boundaries, but expect somewhere < 30ms.  Real world tests have shown between 25-30ms.
 // However these times are somewhat irrelevant now, since the processor isn't blocked and these displays aren't really much good for animation.
 void ssd1306_UpdateScreen(void) {
+	/* A display failure must not stop MIDI or switch scanning.  Callers can
+	 * leave their state marked dirty and retry from the main loop. */
+	if (ssd1306_IsUpdateBusy()) return;
+	if (ssd1306_DMATxLine(0)) display_transmit_line = 1;
+}
 
-	// Delay until the previous update has finished
-	while (display_transmit_line != 0)
-		__NOP();
-
-	ssd1306_DMATxLine(0);
-	display_transmit_line = 1;
+uint8_t ssd1306_IsUpdateBusy(void)
+{
+	return (display_transmit_line != 0U || display_line_transmitting_flag != 0U);
 }
 
 

@@ -2,9 +2,11 @@
 
 #include <stdbool.h>
 #include "flash_midi_settings.h"
+#include "display.h"
 #include "midi_cmds.h"
 #include "midi_defines.h"
 #include "main.h"
+#include "switch_router.h"
 
 // --- Configuration ---
 // Set these to 1 to enable the pedal, 0 to disable
@@ -22,15 +24,15 @@
 // --- End Configuration ---
 
 #define EXP_PEDAL_COUNT        (2U)
-#define EXP_PROCESS_INTERVAL_MS (1U)  // 1ms interval (1kHz) for high resolution
+#define EXP_PROCESS_INTERVAL_MS (1U)  // Preserve original response rate
 #define EXP_DEADZONE_COUNTS    (15U)
+#define EXP_ADC_SAMPLE_COUNT   (16U) // Preserve original averaging depth
 
 extern ADC_HandleTypeDef hadc1;
 #define EXP_ADC_HANDLE (&hadc1)
 
 static const uint32_t kExpChannels[EXP_PEDAL_COUNT] = {ADC_CHANNEL_7, ADC_CHANNEL_8};
 extern uint8_t f_sys_config_complete;
-static uint8_t gExpCcNumbers[EXP_PEDAL_COUNT] = {11U, 4U};
 
 static uint8_t last_sent_midi[EXP_PEDAL_COUNT];
 static uint32_t last_stable_adc[EXP_PEDAL_COUNT];
@@ -70,7 +72,7 @@ static void delay_cycles(uint32_t cycles) {
     while(c--) { __asm("nop"); }
 }
 
-static uint32_t read_adc_channel_pro(uint32_t channel)
+static bool read_adc_channel_pro(uint32_t channel, uint32_t *sample)
 {
   // 1. Switch Pin to Analog Mode (Connect to ADC)
   set_pin_analog(channel);
@@ -80,22 +82,27 @@ static uint32_t read_adc_channel_pro(uint32_t channel)
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5; 
 
-  if (HAL_ADC_ConfigChannel(EXP_ADC_HANDLE, &sConfig) != HAL_OK) return 0;
+  if (HAL_ADC_ConfigChannel(EXP_ADC_HANDLE, &sConfig) != HAL_OK) {
+      set_pin_pulldown(channel);
+      return false;
+  }
   
   // Wait for pin voltage to settle after switching from Pull-Down
   // Pull-down might have drained the capacitor, so we need recovery time.
   // Increased delay drastically to 50000 (approx 1ms) to ensure full rise
   delay_cycles(50000); 
 
-  HAL_ADC_Start(EXP_ADC_HANDLE);
-  HAL_ADC_PollForConversion(EXP_ADC_HANDLE, 2);
+  if (HAL_ADC_Start(EXP_ADC_HANDLE) == HAL_OK)
+      HAL_ADC_PollForConversion(EXP_ADC_HANDLE, 2);
   __HAL_ADC_CLEAR_FLAG(EXP_ADC_HANDLE, ADC_FLAG_EOC);
 
   uint32_t accumulator = 0;
-  for (uint32_t i = 0; i < 16; i++) {
-      HAL_ADC_Start(EXP_ADC_HANDLE);
-      if (HAL_ADC_PollForConversion(EXP_ADC_HANDLE, 2) == HAL_OK) {
+  uint32_t valid_samples = 0U;
+  for (uint32_t i = 0; i < EXP_ADC_SAMPLE_COUNT; i++) {
+      if (HAL_ADC_Start(EXP_ADC_HANDLE) == HAL_OK &&
+          HAL_ADC_PollForConversion(EXP_ADC_HANDLE, 2) == HAL_OK) {
           accumulator += HAL_ADC_GetValue(EXP_ADC_HANDLE);
+          valid_samples++;
       }
   }
   HAL_ADC_Stop(EXP_ADC_HANDLE);
@@ -103,7 +110,9 @@ static uint32_t read_adc_channel_pro(uint32_t channel)
   // 2. Switch Pin back to Pull-Down (Discharge / Prevent Float)
   set_pin_pulldown(channel);
 
-  return accumulator / 16;
+  if (valid_samples == 0U) return false;
+  *sample = accumulator / valid_samples;
+  return true;
 }
 
 static uint8_t expression_adc_to_midi(uint32_t sample)
@@ -124,16 +133,6 @@ static uint8_t expression_adc_to_midi(uint32_t sample)
 
 void expression_init(void)
 {
-  // Load CC numbers from Global Settings if available (Offset 2 and 3)
-  if (pGlobalSettings != NULL) {
-      if (pGlobalSettings[2] != 0 && pGlobalSettings[2] <= 127) {
-          gExpCcNumbers[0] = pGlobalSettings[2];
-      }
-      if (pGlobalSettings[3] != 0 && pGlobalSettings[3] <= 127) {
-          gExpCcNumbers[1] = pGlobalSettings[3];
-      }
-  }
-
   for (uint32_t i = 0; i < EXP_PEDAL_COUNT; i++) {
     last_sent_midi[i] = 0xFFU;
     last_stable_adc[i] = 0;
@@ -147,8 +146,7 @@ void expression_init(void)
 
 static uint8_t midi_channel(void)
 {
-  if (pGlobalSettings == NULL) return 0U;
-  return pGlobalSettings[GLOBAL_SETTINGS_CHANNEL] & 0x0FU;
+  return 0U;
 }
 
 void expression_task(void)
@@ -164,7 +162,8 @@ void expression_task(void)
   #if (ENABLE_EXP_PEDAL_1 == 1)
   {
       uint32_t i = 0;
-      uint32_t raw_avg = read_adc_channel_pro(kExpChannels[i]);
+      uint32_t raw_avg;
+      if (!read_adc_channel_pro(kExpChannels[i], &raw_avg)) return;
       
       // Init
       if (last_sent_midi[i] == 0xFFU) {
@@ -211,8 +210,11 @@ void expression_task(void)
       uint8_t midi_value = expression_adc_to_midi(filtered);
       
       if (last_sent_midi[i] != midi_value) {
-          if (midiCmd_send_cc(channel, gExpCcNumbers[i], midi_value) != ERROR_BUFFERS_FULL) {
+          uint8_t cc = v3_settings_profile(switch_current_page)->exp_cc[i];
+          if (midiCmd_send_cc(channel, cc, midi_value) != ERROR_BUFFERS_FULL) {
               last_sent_midi[i] = midi_value;
+              display_performance_expression(last_sent_midi[0] == 0xFFU ? 0U : last_sent_midi[0],
+                                             last_sent_midi[1] == 0xFFU ? 0U : last_sent_midi[1]);
           }
       }
   }
@@ -222,7 +224,8 @@ void expression_task(void)
   #if (ENABLE_EXP_PEDAL_2 == 1)
   {
       uint32_t i = 1;
-      uint32_t raw_avg = read_adc_channel_pro(kExpChannels[i]);
+      uint32_t raw_avg;
+      if (!read_adc_channel_pro(kExpChannels[i], &raw_avg)) return;
       
       // Init
       if (last_sent_midi[i] == 0xFFU) {
@@ -262,8 +265,11 @@ void expression_task(void)
       uint8_t midi_value = expression_adc_to_midi(filtered);
       
       if (last_sent_midi[i] != midi_value) {
-          if (midiCmd_send_cc(channel, gExpCcNumbers[i], midi_value) != ERROR_BUFFERS_FULL) {
+          uint8_t cc = v3_settings_profile(switch_current_page)->exp_cc[i];
+          if (midiCmd_send_cc(channel, cc, midi_value) != ERROR_BUFFERS_FULL) {
               last_sent_midi[i] = midi_value;
+              display_performance_expression(last_sent_midi[0] == 0xFFU ? 0U : last_sent_midi[0],
+                                             last_sent_midi[1] == 0xFFU ? 0U : last_sent_midi[1]);
           }
       }
   }

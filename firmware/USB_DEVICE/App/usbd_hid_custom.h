@@ -60,6 +60,7 @@ uint8_t USBD_HID_SendReport (USBD_HandleTypeDef *pdev,
                                  uint16_t len);
 
 uint8_t HID_SendReport_FS(uint8_t *report, uint16_t len);
+void USBD_HID_NotifyLinkDown(void);
 
 uint32_t USBD_HID_GetPollingInterval (USBD_HandleTypeDef *pdev);
 

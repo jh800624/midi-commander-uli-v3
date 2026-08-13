@@ -47,6 +47,10 @@ extern USBD_ClassTypeDef  USBD_MIDI;
 
 uint8_t  USBD_MIDI_RegisterInterface  (USBD_HandleTypeDef   *pdev, 
                                       USBD_MIDI_ItfTypeDef *fops);
+uint8_t USBD_MIDI_IsTxIdle(void);
+uint8_t USBD_MIDI_BeginMaintenance(void);
+void USBD_MIDI_EndMaintenance(void);
+void USBD_MIDI_NotifyLinkDown(void);
 
 #ifdef __cplusplus
 }

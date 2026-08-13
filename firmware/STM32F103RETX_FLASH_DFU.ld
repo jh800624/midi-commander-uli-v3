@@ -37,7 +37,8 @@ _Min_Stack_Size = 0x400 ;	/* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 64K
-  FLASH    (rx)    : ORIGIN = (0x8000000 + 0x3000),   LENGTH = (256K - 0x3000)
+  /* RET6 is 512 KB. Keep the final 4 KB unused as a conservative guard area. */
+  FLASH    (rx)    : ORIGIN = (0x8000000 + 0x3000),   LENGTH = (512K - 0x3000 - 4K)
 }
 
 
@@ -153,6 +154,15 @@ SECTIONS
     . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
+  } >RAM
+
+  /* Warm-reset crash telemetry. Startup must not clear this section. */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
   } >RAM
 
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */

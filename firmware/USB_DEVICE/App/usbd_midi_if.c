@@ -38,6 +38,17 @@ void abort_sysex_message(void){
 	sysex_rx_counter = 0;
 }
 
+static uint8_t append_sysex_bytes(const uint8_t *data, uint8_t count)
+{
+	if (count > (uint8_t)(SYSEX_MAX_LENGTH - sysex_rx_counter)) {
+		abort_sysex_message();
+		return 0U;
+	}
+	memcpy(sysex_rx_buffer + sysex_rx_counter, data, count);
+	sysex_rx_counter += count;
+	return 1U;
+}
+
 void sysex_send_message(uint8_t* buffer, uint8_t length){
 	uint8_t *buff_ptr = buffer;
 	uint8_t *assembly_ptr = sysex_tx_assembly_buffer;
@@ -110,8 +121,8 @@ void sysex_write_flash(uint8_t* data_packet_start){
 
 void process_sysex_message(void){
 	// Check start and end bytes
-	if(sysex_rx_buffer[0] != SYSEX_START ||
-			sysex_rx_buffer[sysex_rx_counter -1] != SYSEX_END){
+	if(sysex_rx_counter < 4U || sysex_rx_buffer[0] != SYSEX_START ||
+				sysex_rx_buffer[sysex_rx_counter -1] != SYSEX_END){
 		abort_sysex_message();
 		return;
 	}
@@ -124,15 +135,13 @@ void process_sysex_message(void){
 	}
 
 	switch(pSysexHead->msg_cmd){
+	/* v3 owns its configuration store.  Do not let the factory editor erase
+	 * or write it through its old raw-page SysEx protocol. */
 	case SYSEX_CMD_ERASE_FLASH:
-		sysex_erase_settings(&(pSysexHead->start_parameters));
-		break;
 	case SYSEX_CMD_WRITE_FLASH:
-		// TODO: check data length
-		sysex_write_flash(&(pSysexHead->start_parameters));
 		break;
 	case SYSEX_CMD_RESET:
-		NVIC_SystemReset();
+		if (sysex_rx_counter == 4U) NVIC_SystemReset();
 		break;
 	default:
 		break;
@@ -143,13 +152,15 @@ void process_sysex_message(void){
 
 uint16_t MIDI_DataRx(uint8_t *msg, uint16_t length)
 {
+	if (msg == NULL) return USBD_FAIL;
+	midiCmd_note_transport_activity();
 
-	//uint8_t cable = (msg[0]>>4) & 0xF;
-
-	uint8_t processed_data_cnt = 0;
-
-	while(processed_data_cnt < length){
-		uint8_t usb_msg_cin = msg[processed_data_cnt] & 0xF;
+	/* USB-MIDI event packets are always four bytes, regardless of how many MIDI
+	 * bytes their CIN contains.  Advancing by 2/3 bytes desynchronised the old
+	 * parser, and an unbounded SysEx stream could overwrite adjacent RAM. */
+	uint16_t processed_data_cnt = 0U;
+	while ((uint16_t)(processed_data_cnt + 4U) <= length) {
+		uint8_t usb_msg_cin = msg[processed_data_cnt] & 0x0FU;
 
 		if(sysex_rx_counter != 0){
 			if(usb_msg_cin != CIN_SYSEX_STARTS_OR_CONTINUES &&
@@ -162,54 +173,49 @@ uint16_t MIDI_DataRx(uint8_t *msg, uint16_t length)
 
 		switch(usb_msg_cin){
 		case CIN_SYSEX_STARTS_OR_CONTINUES:
-			memcpy(sysex_rx_buffer + sysex_rx_counter, msg + processed_data_cnt + 1, 3);
-			sysex_rx_counter += 3;
-			processed_data_cnt += 4;
+			append_sysex_bytes(msg + processed_data_cnt + 1U, 3U);
 			break;
 		case CIN_SYSEX_ENDS_WITH_FOLLOWING_SINGLE_BYTE:
-			sysex_rx_buffer[sysex_rx_counter] = msg[processed_data_cnt + 1];
-			sysex_rx_counter++;
-			processed_data_cnt += 2;
-			process_sysex_message();
+			if (append_sysex_bytes(msg + processed_data_cnt + 1U, 1U))
+				process_sysex_message();
 			break;
 		case CIN_SYSEX_ENDS_WITH_FOLLOWING_TWO_BYTES:
-			memcpy(sysex_rx_buffer + sysex_rx_counter, msg + processed_data_cnt + 1, 2);
-			sysex_rx_counter += 2;
-			processed_data_cnt += 3;
-			process_sysex_message();
+			if (append_sysex_bytes(msg + processed_data_cnt + 1U, 2U))
+				process_sysex_message();
 			break;
 		case CIN_SYSEX_ENDS_WITH_FOLLOWING_THREE_BYTES:
-			memcpy(sysex_rx_buffer + sysex_rx_counter, msg + processed_data_cnt + 1, 3);
-			sysex_rx_counter += 3;
-			processed_data_cnt += 4;
-			process_sysex_message();
+			if (append_sysex_bytes(msg + processed_data_cnt + 1U, 3U))
+				process_sysex_message();
 			break;
 
-		case CIN_SINGLE_BYTE:
-			// Realtime messages, like sync, if enabled send through to serial midi port.
-			if(pGlobalSettings[GLOBAL_SETTINGS_REALTIME_PASS]){
-				if(msg[processed_data_cnt+1] == 0xF8 || msg[processed_data_cnt+1] == 0xFA ||msg[processed_data_cnt+1] == 0xFC){
-					midiCmd_send_byte_serial(msg[processed_data_cnt+1]);
-				}
-			}
-			processed_data_cnt += 2;
+		case CIN_SINGLE_BYTE: {
+			/* The v3 2-profile x 10-key x 1-command model is independent of
+			 * transport forwarding.  Restore USB-to-DIN system real-time bytes,
+			 * including Continue. Deliberately do not forward Active Sensing or
+			 * System Reset: they were not part of the original transport feature. */
+			const uint8_t realtime = msg[processed_data_cnt + 1U];
+			if (realtime == MIDI_REALTIME_CLOCK ||
+				realtime == MIDI_REALTIME_START ||
+				realtime == MIDI_REALTIME_CONTINUE ||
+				realtime == MIDI_REALTIME_STOP)
+				midiCmd_send_byte_serial(realtime);
 			break;
+		}
 
 		default:
-			// Un-recognised message - most likely just padding.
-			// skip to end of USB packet
-			processed_data_cnt = length;
+			if (sysex_rx_counter != 0U) abort_sysex_message();
 			break;
 
 		}
-
+		processed_data_cnt += 4U;
 	}
 
-	return 0;
+	return USBD_OK;
 }
 
 uint16_t MIDI_DataTx(uint8_t *msg, uint16_t length)
 {
-  USBD_MIDI_SendPacket(msg, length);
-  return USBD_OK;
+  if (length > UINT8_MAX) return USBD_FAIL;
+  midiCmd_note_transport_activity();
+  return USBD_MIDI_SendPacket(msg, (uint8_t)length);
 }

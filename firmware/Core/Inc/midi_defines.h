@@ -55,6 +55,14 @@
 #define CMD_KEY_NIBBLE		(0xD0)
 #define CMD_START_NIBBLE	(0x10)
 #define CMD_STOP_NIBBLE		(0x20)
+/* Tap tempo has no MIDI channel.  It starts the local 24 PPQN clock engine. */
+#define CMD_TAP_TEMPO_NIBBLE	(0x30)
+
+/* MIDI real-time bytes. */
+#define MIDI_REALTIME_CLOCK	(0xF8)
+#define MIDI_REALTIME_START	(0xFA)
+#define MIDI_REALTIME_CONTINUE	(0xFB)
+#define MIDI_REALTIME_STOP		(0xFC)
 
 #define GLOBAL_SETTINGS_CHANNEL (0)
 #define GLOBAL_SETTINGS_REALTIME_PASS (1)

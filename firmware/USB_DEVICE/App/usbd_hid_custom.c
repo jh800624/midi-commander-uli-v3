@@ -213,6 +213,8 @@ static uint8_t  USBD_HID_DeInit (USBD_HandleTypeDef *pdev,
     pdev->pClassData = NULL;
   }
 
+  pInstanceHID = NULL;
+
   return USBD_OK;
 }
 
@@ -328,6 +330,11 @@ uint8_t USBD_HID_SendReport (USBD_HandleTypeDef  *pdev,
 uint8_t HID_SendReport_FS(uint8_t *report, uint16_t len) {
     if(pInstanceHID == NULL) return 1;
     return USBD_HID_SendReport(pInstanceHID, report, len);
+}
+
+void USBD_HID_NotifyLinkDown(void) {
+    if (pInstanceHID != NULL && pInstanceHID->pClassData != NULL)
+        ((USBD_HID_HandleTypeDef *)pInstanceHID->pClassData)->state = HID_IDLE;
 }
 
 /**

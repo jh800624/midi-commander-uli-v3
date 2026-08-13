@@ -124,18 +124,52 @@ static uint8_t  USBD_MIDI_DataOut (USBD_HandleTypeDef *pdev, uint8_t epnum)
 
 
 
-void USBD_MIDI_SendPacket (uint8_t* buffer, uint8_t len){
+uint8_t USBD_MIDI_SendPacket(uint8_t *buffer, uint8_t len){
+	/* MIDI must keep working on the DIN output when USB is unplugged.  The old
+	 * code dereferenced a NULL pInstance before enumeration and spun forever if
+	 * an IN transfer stopped completing during suspend/disconnect. */
+	if (pInstance == NULL || pInstance->dev_state != USBD_STATE_CONFIGURED)
+		return USBD_FAIL;
+	if (USB_Tx_State != 0U)
+		return USBD_BUSY;
 
-	if(pInstance->dev_state != USBD_STATE_CONFIGURED)
-		return;
+	USB_Tx_State = 1U;
+	uint8_t status = USBD_LL_Transmit(pInstance, MIDI_IN_EP, buffer, len);
+	if (status != USBD_OK)
+		USB_Tx_State = 0U;
+	return status;
+}
 
-	while(USB_Tx_State)
-		;
+uint8_t USBD_MIDI_IsTxIdle(void){
+	return USB_Tx_State == 0U;
+}
 
-    USB_Tx_State = 1;
-    while(USBD_LL_Transmit(pInstance, MIDI_IN_EP,buffer,len) != USBD_OK)
-    	;
+uint8_t USBD_MIDI_BeginMaintenance(void){
+	/* Bulk OUT NAK makes the host retry instead of losing a real-time packet
+	 * while single-bank Flash temporarily stalls instruction fetch. */
+	if (pInstance == NULL || pInstance->dev_state != USBD_STATE_CONFIGURED)
+		return 1U;
+	if (pInstance->pData == NULL || USB_Tx_State != 0U)
+		return 0U;
+	PCD_HandleTypeDef *hpcd = (PCD_HandleTypeDef *)pInstance->pData;
+	const uint32_t primask = __get_PRIMASK();
+	__disable_irq();
+	PCD_SET_EP_RX_STATUS(hpcd->Instance, MIDI_OUT_EP & 0x7FU, USB_EP_RX_NAK);
+	if (primask == 0U) __enable_irq();
+	return 1U;
+}
 
+void USBD_MIDI_EndMaintenance(void){
+	if (pInstance != NULL && pInstance->dev_state == USBD_STATE_CONFIGURED)
+		(void)USBD_LL_PrepareReceive(pInstance, MIDI_OUT_EP, USB_Rx_Buffer,
+				MIDI_DATA_OUT_PACKET_SIZE);
+}
+
+void USBD_MIDI_NotifyLinkDown(void){
+	/* An IN transfer that was active when VBUS/traffic disappeared will never
+	 * receive DataIn completion. Clear only the software busy latch; subsequent
+	 * sends remain rejected by dev_state until USB is configured again. */
+	USB_Tx_State = 0U;
 }
 
 static uint8_t *USBD_MIDI_GetCfgDesc (uint16_t *length){

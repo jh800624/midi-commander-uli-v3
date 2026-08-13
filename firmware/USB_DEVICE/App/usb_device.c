@@ -30,7 +30,6 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_midi.h"
 #include "usbd_midi_if.h"
-#include "usbd_composite_midi_hid.h"
 
 /* USER CODE END Includes */
 
@@ -46,6 +45,12 @@
 
 /* USB Device Core handle declaration. */
 USBD_HandleTypeDef hUsbDeviceFS;
+
+uint8_t usb_device_is_connected(void)
+{
+  return hUsbDeviceFS.dev_state == USBD_STATE_ADDRESSED ||
+         hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED;
+}
 
 /*
  * -- Insert your variables declaration here --
@@ -77,11 +82,15 @@ void MX_USB_DEVICE_Init(void)
 	Error_Handler();
   }
 
-	USBD_RegisterClass(&hUsbDeviceFS, &USBD_COMPOSITE_MIDI_HID);
-
-	USBD_MIDI_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS);
-
-	USBD_Start(&hUsbDeviceFS);
+	/* V3 exposes a class-compliant MIDI device only.  The extra HID keyboard
+	 * interface from the custom upstream build is unused by the V3 key model
+	 * and causes some embedded USB hosts to reject the whole composite device. */
+		if (USBD_RegisterClass(&hUsbDeviceFS, &USBD_MIDI) != USBD_OK ||
+		    USBD_MIDI_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK ||
+		    USBD_Start(&hUsbDeviceFS) != USBD_OK)
+		{
+			Error_Handler();
+		}
 	return;
 
   /* USER CODE END USB_DEVICE_Init_PreTreatment */

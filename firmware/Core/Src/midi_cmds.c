@@ -33,6 +33,29 @@ uint8_t midi_usb_assembly_buffer[16];
 uint8_t midi_uart_out_buffer[NO_BUFFERS][BUFFER_SIZE];
 uint8_t midi_uart_out_buffer_bytes_to_tx[NO_BUFFERS] = {0}; // Indicates that a buffer is ready to be sent, and therefore also can't be written to.
 uint8_t last_transmitted_buffer = NO_BUFFERS -1; // When a buffer is given to the DMA, this is set with the buffer number.  That allows buffers to be sent in order.
+static volatile uint32_t last_transport_activity_tick;
+
+void midiCmd_note_transport_activity(void){
+	last_transport_activity_tick = HAL_GetTick();
+}
+
+uint8_t midiCmd_transport_idle_for(uint32_t quiet_ms){
+	if ((uint32_t)(HAL_GetTick() - last_transport_activity_tick) < quiet_ms)
+		return 0U;
+	if (huart2.gState != HAL_UART_STATE_READY || !USBD_MIDI_IsTxIdle())
+		return 0U;
+
+	uint8_t idle = 1U;
+	__disable_irq();
+	for (uint8_t i = 0U; i < NO_BUFFERS; i++) {
+		if (midi_uart_out_buffer_bytes_to_tx[i] != 0U) {
+			idle = 0U;
+			break;
+		}
+	}
+	__enable_irq();
+	return idle;
+}
 
 // Note should only be called from critical section, not thread safe
 static int8_t get_next_available_tx_buffer(void){
@@ -73,10 +96,13 @@ void midi_serial_start_next_dma(void){
 	}
 
 	if(buffer_to_transmit < NO_BUFFERS){
-		// We've found a valid buffer to transmit
-		while(HAL_UART_Transmit_DMA(&huart2, midi_uart_out_buffer[buffer_to_transmit],
-				midi_uart_out_buffer_bytes_to_tx[buffer_to_transmit]) != HAL_OK);
-		last_transmitted_buffer = buffer_to_transmit;
+		/* Never spin here: a stalled UART/DMA used to turn a transient transport
+		 * problem into a complete footswitch freeze.  Leave the queued message
+		 * intact and let the regular main loop or the DMA-complete callback retry. */
+		if(HAL_UART_Transmit_DMA(&huart2, midi_uart_out_buffer[buffer_to_transmit],
+				midi_uart_out_buffer_bytes_to_tx[buffer_to_transmit]) == HAL_OK){
+			last_transmitted_buffer = buffer_to_transmit;
+		}
 	}
 
 }
@@ -134,6 +160,7 @@ int8_t midiCmd_send_stop_command(void){
  * This is to transfer start/stop/sync messages through from the USB to the midi port
  */
 void midiCmd_send_byte_serial(uint8_t byteMessage){
+	midiCmd_note_transport_activity();
 	__disable_irq();
 	int8_t buffer_no = get_next_available_tx_buffer();
 	if(buffer_no < 0){
@@ -147,6 +174,36 @@ void midiCmd_send_byte_serial(uint8_t byteMessage){
 	__enable_irq();
 
 	midi_serial_transmit();
+}
+
+void midiCmd_task(void)
+{
+	/* If starting DMA previously returned BUSY/ERROR, retry from the main loop
+	 * even when no new MIDI message arrives. */
+	midi_serial_transmit();
+}
+
+/* Send a MIDI real-time byte to both outputs.  F8 clock messages are one byte
+ * and intentionally bypass channel filtering. */
+int8_t midiCmd_send_realtime(uint8_t byteMessage){
+	__disable_irq();
+	int8_t buffer_no = get_next_available_tx_buffer();
+	if(buffer_no < 0){
+		__enable_irq();
+		return ERROR_BUFFERS_FULL;
+	}
+
+	midi_usb_assembly_buffer[0] = CIN_SINGLE_BYTE;
+	midi_usb_assembly_buffer[1] = byteMessage;
+	midi_usb_assembly_buffer[2] = 0;
+	midi_usb_assembly_buffer[3] = 0;
+	midi_uart_out_buffer[buffer_no][0] = byteMessage;
+	midi_uart_out_buffer_bytes_to_tx[buffer_no] = 1;
+	__enable_irq();
+
+	MIDI_DataTx(midi_usb_assembly_buffer, 4);
+	midi_serial_transmit();
+	return 0;
 }
 
 int8_t midiCmd_send_start_command(void){
@@ -266,6 +323,25 @@ int8_t midiCmd_send_cc(uint8_t channel, uint8_t cc_number, uint8_t value)
 	uint8_t usb_bytes_to_tx = usbBuf - midi_usb_assembly_buffer;
 	MIDI_DataTx(midi_usb_assembly_buffer, usb_bytes_to_tx);
 
+	midi_serial_transmit();
+	return 0;
+}
+
+int8_t midiCmd_send_pc(uint8_t channel, uint8_t program)
+{
+	__disable_irq();
+	int8_t buffer_no = get_next_available_tx_buffer();
+	if (buffer_no < 0) { __enable_irq(); return ERROR_BUFFERS_FULL; }
+	uint8_t *serialBuf = &(midi_uart_out_buffer[buffer_no][0]);
+	midi_usb_assembly_buffer[0] = CIN_PROGRAM_CHANGE;
+	midi_usb_assembly_buffer[1] = 0xC0 | (channel & 0x0F);
+	midi_usb_assembly_buffer[2] = program & 0x7F;
+	midi_usb_assembly_buffer[3] = 0;
+	serialBuf[0] = midi_usb_assembly_buffer[1];
+	serialBuf[1] = midi_usb_assembly_buffer[2];
+	midi_uart_out_buffer_bytes_to_tx[buffer_no] = 2;
+	__enable_irq();
+	MIDI_DataTx(midi_usb_assembly_buffer, 4);
 	midi_serial_transmit();
 	return 0;
 }

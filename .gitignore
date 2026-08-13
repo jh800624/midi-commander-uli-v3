@@ -44,7 +44,10 @@ dkms.conf
 .DS_Store
 .pio/
 .vscode/
+compile_commands.json
+__pycache__/
+backups/
+artifacts/dfu/platformio-20*.dfu
 
 
 flash_error.log
-docs
