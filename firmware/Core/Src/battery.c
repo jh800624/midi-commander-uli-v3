@@ -4,14 +4,16 @@
 #include "main.h"
 #include "usb_device.h"
 
-/* Stock MA1010 firmware measures ADC1 channel 1 against VREFINT and uses
+/* Stock MA1010 firmware measures supply channels against VREFINT and uses
  * centivolts = 120 * CH15 / VREFINT.  ADC1 channel 1 is the USB supply sense;
  * channel 15 on PC5 is the battery sense.  This product uses two series NiMH AAA
- * cells.  The stock state machine treats about 2.75 V as battery-low; the
- * observed charged pack is about 3.10 V. */
+ * cells.  Charging voltage is not a valid discharge-state percentage scale:
+ * a separately charged pack was measured in the powered unit at 2.57 V.
+ * Keep the factory ADC path, but calibrate the UI estimate from the observed
+ * loaded full voltage and a conservative 1.00 V/cell empty point. */
 #define BATTERY_SAMPLE_INTERVAL_MS (1000U)
-#define BATTERY_MIN_CV             (275U)
-#define BATTERY_MAX_CV             (310U)
+#define BATTERY_EMPTY_CV           (200U)
+#define BATTERY_FULL_CV            (255U)
 #define BATTERY_PLAUSIBLE_MIN_CV   (200U)
 #define BATTERY_PLAUSIBLE_MAX_CV   (350U)
 
@@ -96,8 +98,9 @@ uint16_t battery_get_centivolts(void)
 
 uint8_t battery_get_percent(void)
 {
-    if (!battery_valid || battery_centivolts <= BATTERY_MIN_CV) return 0U;
-    if (battery_centivolts >= BATTERY_MAX_CV) return 100U;
-    return (uint8_t)(((uint32_t)(battery_centivolts - BATTERY_MIN_CV) * 100U) /
-                     (BATTERY_MAX_CV - BATTERY_MIN_CV));
+    if (!battery_valid || battery_centivolts <= BATTERY_EMPTY_CV) return 0U;
+    if (battery_centivolts >= BATTERY_FULL_CV) return 100U;
+    return (uint8_t)(((uint32_t)(battery_centivolts - BATTERY_EMPTY_CV) * 100U +
+                      (BATTERY_FULL_CV - BATTERY_EMPTY_CV) / 2U) /
+                     (BATTERY_FULL_CV - BATTERY_EMPTY_CV));
 }

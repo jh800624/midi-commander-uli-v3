@@ -4,14 +4,14 @@
 
 ## 穩定版
 
-- 版本：`v3.0.0-stable`
+- 版本：`v3.0.1-stable`
 - 開機顯示：`uLi MIDI Mod v3`
-- DFU：[uli-midi-mod-v3.0.0-stable.dfu](artifacts/releases/uli-midi-mod-v3.0.0-stable.dfu)
-- DFU SHA-256：`8c96003dde3e9450509ecadd490e6e2f33110431afcd8f5f78ac186727a3045d`
-- 韌體 payload SHA-256：`4de8903c475fdcecf0252e4269ed36b902deeda37a73b1b327f070f0b46256b9`
-- 完整檢查紀錄：[STABLE-v3.0.0.md](docs/STABLE-v3.0.0.md)
+- DFU：[uli-midi-mod-v3.0.1-stable.dfu](artifacts/releases/uli-midi-mod-v3.0.1-stable.dfu)
+- DFU SHA-256：`f1eb0bc1261bca12a183bbf1994ab5c135c1434d685fc99785dd6ab4b4b96a92`
+- 韌體 payload SHA-256：`169157eefe9164c86e0bf296b2a70d426e2634a2516e8ebdda04905d5e6ee6b9`
+- 完整檢查紀錄：[STABLE-v3.0.1.md](docs/STABLE-v3.0.1.md)
 
-這個 DFU 與 2026-08-14 已刷入機器、並由 Flash 讀回比對成功的 payload 相同。DFU 只包含從 `0x08003000` 開始的應用程式，不覆蓋原廠 bootloader。
+這個 DFU 已於 2026-08-14 刷入實機，並確認電池模式顯示 `2.61V / 100%`。DFU 只包含從 `0x08003000` 開始的應用程式，不覆蓋原廠 bootloader。上一版 `v3.0.0-stable` 仍保留在 releases 目錄作為回復點。
 
 ## 操作
 
@@ -41,6 +41,8 @@
 - USB 連線時左上只顯示 `USB`；拔除後切回小型 `BAT`、電量百分比與電壓。
 - USB 使用後拔線，電池／DIN 模式繼續運作，不會因 USB suspend 讓整台停住。
 - watchdog 與 warm-reset crash telemetry；fault handler 不擦寫 Flash。
+
+電池百分比是兩顆 NiMH AAA 在機器帶載時的電壓估計，不是充電器容量計。V3.0.1 依實機外部充滿後讀到的 `2.57V` 校正：`2.55V` 以上顯示 100%，`2.00V` 以下顯示 0%。
 
 ## 設定保存
 
