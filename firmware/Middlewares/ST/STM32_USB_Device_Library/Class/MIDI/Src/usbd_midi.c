@@ -18,6 +18,7 @@ static uint8_t  USBD_MIDI_Init (USBD_HandleTypeDef *pdev, uint8_t cfgidx);
 static uint8_t  USBD_MIDI_DeInit (USBD_HandleTypeDef *pdev, uint8_t cfgidx);
 static uint8_t  USBD_MIDI_DataIn (USBD_HandleTypeDef *pdev, uint8_t epnum);
 static uint8_t  USBD_MIDI_DataOut (USBD_HandleTypeDef *pdev, uint8_t epnum);
+static void USBD_MIDI_StartNextPacket(void);
 
 static uint8_t  *USBD_MIDI_GetCfgDesc (uint16_t *length);
 
@@ -27,6 +28,20 @@ uint32_t APP_Rx_ptr_in  = 0;
 uint32_t APP_Rx_ptr_out = 0;
 uint32_t APP_Rx_length  = 0;
 volatile uint8_t  USB_Tx_State = 0;
+
+/* A USB IN endpoint has only one hardware transfer slot.  Footswitch MIDI
+ * must not be discarded just because the host has not acknowledged the prior
+ * packet yet, so retain complete USB-MIDI endpoint packets in FIFO order. */
+#define MIDI_TX_QUEUE_DEPTH  (32U)
+#define MIDI_TX_QUEUE_BYTES  (MIDI_DATA_IN_PACKET_SIZE)
+typedef struct {
+  uint8_t data[MIDI_TX_QUEUE_BYTES];
+  uint8_t length;
+} midi_tx_queue_entry_t;
+static midi_tx_queue_entry_t midi_tx_queue[MIDI_TX_QUEUE_DEPTH];
+static volatile uint8_t midi_tx_queue_head;
+static volatile uint8_t midi_tx_queue_tail;
+static volatile uint8_t midi_tx_queue_count;
 
 __ALIGN_BEGIN uint8_t USB_Rx_Buffer[MIDI_DATA_OUT_PACKET_SIZE] __ALIGN_END ;
 __ALIGN_BEGIN uint8_t APP_Rx_Buffer[APP_RX_DATA_SIZE] __ALIGN_END ;
@@ -82,6 +97,10 @@ __ALIGN_BEGIN uint8_t USBD_MIDI_CfgDesc[USB_MIDI_CONFIG_DESC_SIZ] __ALIGN_END =
 
 static uint8_t USBD_MIDI_Init(USBD_HandleTypeDef *pdev, uint8_t cfgidx){
   pInstance = pdev;
+  USB_Tx_State = 0U;
+  midi_tx_queue_head = 0U;
+  midi_tx_queue_tail = 0U;
+  midi_tx_queue_count = 0U;
   USBD_LL_OpenEP(pdev,MIDI_IN_EP,USBD_EP_TYPE_BULK,MIDI_DATA_IN_PACKET_SIZE);
   USBD_LL_OpenEP(pdev,MIDI_OUT_EP,USBD_EP_TYPE_BULK,MIDI_DATA_OUT_PACKET_SIZE);
 
@@ -94,6 +113,10 @@ static uint8_t USBD_MIDI_Init(USBD_HandleTypeDef *pdev, uint8_t cfgidx){
 
 static uint8_t USBD_MIDI_DeInit (USBD_HandleTypeDef *pdev, uint8_t cfgidx){
   pInstance = NULL;
+  USB_Tx_State = 0U;
+  midi_tx_queue_head = 0U;
+  midi_tx_queue_tail = 0U;
+  midi_tx_queue_count = 0U;
   USBD_LL_CloseEP(pdev,MIDI_IN_EP);
   USBD_LL_CloseEP(pdev,MIDI_OUT_EP);
   return 0;
@@ -104,6 +127,7 @@ static uint8_t USBD_MIDI_DataIn (USBD_HandleTypeDef *pdev, uint8_t epnum){
   if (USB_Tx_State == 1){
     USB_Tx_State = 0;
   }
+  USBD_MIDI_StartNextPacket();
   return USBD_OK;
 }
 
@@ -124,24 +148,57 @@ static uint8_t  USBD_MIDI_DataOut (USBD_HandleTypeDef *pdev, uint8_t epnum)
 
 
 
+static void USBD_MIDI_StartNextPacket(void){
+  if (pInstance == NULL || pInstance->dev_state != USBD_STATE_CONFIGURED ||
+      USB_Tx_State != 0U || midi_tx_queue_count == 0U)
+    return;
+
+  const uint8_t slot = midi_tx_queue_tail;
+  USB_Tx_State = 1U;
+  if (USBD_LL_Transmit(pInstance, MIDI_IN_EP, midi_tx_queue[slot].data,
+                       midi_tx_queue[slot].length) == USBD_OK) {
+    midi_tx_queue_tail = (uint8_t)((slot + 1U) % MIDI_TX_QUEUE_DEPTH);
+    midi_tx_queue_count--;
+  } else {
+    USB_Tx_State = 0U;
+  }
+}
+
 uint8_t USBD_MIDI_SendPacket(uint8_t *buffer, uint8_t len){
 	/* MIDI must keep working on the DIN output when USB is unplugged.  The old
 	 * code dereferenced a NULL pInstance before enumeration and spun forever if
 	 * an IN transfer stopped completing during suspend/disconnect. */
 	if (pInstance == NULL || pInstance->dev_state != USBD_STATE_CONFIGURED)
 		return USBD_FAIL;
-	if (USB_Tx_State != 0U)
-		return USBD_BUSY;
+	if (buffer == NULL || len == 0U || len > MIDI_TX_QUEUE_BYTES)
+		return USBD_FAIL;
 
-	USB_Tx_State = 1U;
-	uint8_t status = USBD_LL_Transmit(pInstance, MIDI_IN_EP, buffer, len);
-	if (status != USBD_OK)
-		USB_Tx_State = 0U;
-	return status;
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (midi_tx_queue_count >= MIDI_TX_QUEUE_DEPTH) {
+    if (primask == 0U) __enable_irq();
+		return USBD_BUSY;
+  }
+
+	const uint8_t slot = midi_tx_queue_head;
+	memcpy(midi_tx_queue[slot].data, buffer, len);
+	midi_tx_queue[slot].length = len;
+	midi_tx_queue_head = (uint8_t)((slot + 1U) % MIDI_TX_QUEUE_DEPTH);
+	midi_tx_queue_count++;
+	USBD_MIDI_StartNextPacket();
+  if (primask == 0U) __enable_irq();
+	return USBD_OK;
 }
 
 uint8_t USBD_MIDI_IsTxIdle(void){
-	return USB_Tx_State == 0U;
+	return USB_Tx_State == 0U && midi_tx_queue_count == 0U;
+}
+
+void USBD_MIDI_TxTask(void){
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  USBD_MIDI_StartNextPacket();
+  if (primask == 0U) __enable_irq();
 }
 
 uint8_t USBD_MIDI_BeginMaintenance(void){
@@ -170,6 +227,9 @@ void USBD_MIDI_NotifyLinkDown(void){
 	 * receive DataIn completion. Clear only the software busy latch; subsequent
 	 * sends remain rejected by dev_state until USB is configured again. */
 	USB_Tx_State = 0U;
+	midi_tx_queue_head = 0U;
+	midi_tx_queue_tail = 0U;
+	midi_tx_queue_count = 0U;
 }
 
 static uint8_t *USBD_MIDI_GetCfgDesc (uint16_t *length){

@@ -89,6 +89,19 @@ class FirmwareSafetyTests(unittest.TestCase):
         self.assertIn("void midiCmd_task(void)", midi)
         self.assertNotIn("while(HAL_UART_Transmit_DMA", midi)
 
+    def test_busy_usb_endpoint_queues_footswitch_packets(self):
+        usb = (PROJECT / "firmware" / "Middlewares" / "ST" /
+               "STM32_USB_Device_Library" / "Class" / "MIDI" / "Src" /
+               "usbd_midi.c").read_text()
+        midi = (PROJECT / "firmware" / "Core" / "Src" /
+                "midi_cmds.c").read_text()
+        self.assertIn("MIDI_TX_QUEUE_DEPTH  (32U)", usb)
+        self.assertIn("memcpy(midi_tx_queue[slot].data, buffer, len)", usb)
+        self.assertIn("USBD_MIDI_StartNextPacket();", usb)
+        self.assertIn("void USBD_MIDI_TxTask(void)", usb)
+        self.assertIn("USBD_MIDI_TxTask();", midi)
+        self.assertNotIn("if (USB_Tx_State != 0U)\n\t\treturn USBD_BUSY", usb)
+
     def test_usb_enumerates_as_midi_only_for_embedded_host_compatibility(self):
         usb = (PROJECT / "firmware" / "USB_DEVICE" / "App" /
                "usb_device.c").read_text()

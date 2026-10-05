@@ -181,6 +181,7 @@ void midiCmd_task(void)
 	/* If starting DMA previously returned BUSY/ERROR, retry from the main loop
 	 * even when no new MIDI message arrives. */
 	midi_serial_transmit();
+	USBD_MIDI_TxTask();
 }
 
 /* Send a MIDI real-time byte to both outputs.  F8 clock messages are one byte
