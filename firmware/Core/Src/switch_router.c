@@ -450,7 +450,9 @@ static void handle_v3_key_down(uint8_t sw, uint8_t toggle_state)
 	}
 	display_performance_key(sw == V3_SW_0 ? 0U : sw + 1U, key->mode,
 	                        display_number, display_value,
-	                        switch_current_page);
+	                        switch_current_page,
+	                        key->toggle,
+	                        key->toggle && toggle_state);
 	/* A transiently full DIN queue may drop this event, but must never turn a
 	 * busy MIDI burst into a device-wide fatal error. */
 	(void)status;

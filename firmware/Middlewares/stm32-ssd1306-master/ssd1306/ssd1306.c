@@ -123,8 +123,8 @@ void ssd1306_Init(void) {
 
     ssd1306_WriteCommand(0xC8); //Set COM Output Scan Direction
 
-    ssd1306_WriteCommand(0x00); //---set low column address
-    ssd1306_WriteCommand(0x10); //---set high column address
+    ssd1306_WriteCommand(SSD1306_COLUMN_OFFSET & 0x0F);
+    ssd1306_WriteCommand(0x10 | ((SSD1306_COLUMN_OFFSET >> 4) & 0x0F));
 
     ssd1306_WriteCommand(0x40); //--set start line address - CHECK
 
@@ -196,9 +196,12 @@ static uint8_t ssd1306_DMATxLine(uint8_t line){
 	// as each transaction will be triggered by DMA completion.
 	line_tx_buffer[0] = 0xB0 + line;
 	line_tx_buffer[1] = 0x80; // CMD
-	line_tx_buffer[2] = 0;
+	/* The controller RAM is two columns wider than the visible glass.  Keep
+	 * the framebuffer logical (128 pixels) and apply its fixed hardware
+	 * offset only when addressing the panel. */
+	line_tx_buffer[2] = SSD1306_COLUMN_OFFSET & 0x0F;
 	line_tx_buffer[3] = 0x80; // CMD
-	line_tx_buffer[4] = 0x10;
+	line_tx_buffer[4] = 0x10 | ((SSD1306_COLUMN_OFFSET >> 4) & 0x0F);
 	line_tx_buffer[5] = 0x40;
 
 	memcpy(line_tx_buffer + 6, &SSD1306_Buffer[SSD1306_WIDTH*line], SSD1306_WIDTH);

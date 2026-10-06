@@ -48,10 +48,14 @@
 #define SSD1306_INCLUDE_FONT_11x18
 #define SSD1306_INCLUDE_FONT_16x26
 
-// Some OLEDs don't display anything in first two columns.
-// In this case change the following macro to 130.
-// The default value is 128.
-#define SSD1306_WIDTH           130
+/*
+ * The panel has a 128 x 64 visible pixel area.  Its controller RAM starts
+ * two columns before the glass, so the transport begins at column 2 below.
+ * Keep the framebuffer at the visible width: making it 130 causes the two
+ * extra bytes in each page to wrap into the next page on 128-column panels.
+ */
+#define SSD1306_WIDTH           128
+#define SSD1306_COLUMN_OFFSET   2
 
 // The height can be changed as well if necessary.
 // It can be 32, 64 or 128. The default value is 64.

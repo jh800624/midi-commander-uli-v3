@@ -160,21 +160,85 @@ class FirmwareSafetyTests(unittest.TestCase):
         self.assertLess(terminal.index("charger_off();"),
                         terminal.index("show_message"))
 
-    def test_normal_ui_uses_v2_preview_layout_without_fake_battery_percent(self):
+    def test_normal_ui_keeps_status_outside_the_central_display_frame(self):
         display = (PROJECT / "firmware" / "Core" / "Src" / "display.c").read_text()
-        performance = display.split("static void draw_performance", 1)[1]
+        performance = display.split("static void draw_performance(void)", 1)[1]
         performance = performance.split("void display_init", 1)[0]
-        self.assertIn('"CUS-2" : "CUS-1"', performance)
         self.assertIn("Font_16x26", performance)
         self.assertIn("performance_exp[exp]", performance)
         self.assertIn('ssd1306_WriteString("USB", Font_6x8', performance)
         self.assertIn('ssd1306_WriteString("BAT", Font_6x8', performance)
         self.assertNotIn("Font_11x18", performance)
         self.assertNotIn("ssd1306_DrawRectangle(2, 12, 31, 21", performance)
-        self.assertIn('"CC %03u %03u"', performance)
+        self.assertIn('boot_profile ? "CUS-2" : "CUS-1"', performance)
+        self.assertIn("#define BOOT_PROFILE_MS              (750U)", display)
+        self.assertIn("if (boot_profile_visible)", performance)
+        self.assertNotIn('"CC %03u %03u"', performance)
         self.assertIn("performance_battery_percent", performance)
-        self.assertIn("performance_battery_centivolts", performance)
+        self.assertNotIn("performance_battery_centivolts", performance)
         self.assertNotIn('"BAT %', performance)
+
+    def test_each_press_flashes_a_maximum_central_display_frame(self):
+        display = (PROJECT / "firmware" / "Core" / "Src" / "display.c").read_text()
+        router = (PROJECT / "firmware" / "Core" / "Src" /
+                  "switch_router.c").read_text()
+        performance = display.split("static void draw_performance(void)", 1)[1]
+        performance = performance.split("void display_init", 1)[0]
+        self.assertIn("#define PERFORMANCE_BOX_X           (32U)", display)
+        self.assertIn("#define PERFORMANCE_BOX_WIDTH       (64U)", display)
+        self.assertIn("#define PERFORMANCE_BOX_Y           (2U)", display)
+        self.assertIn("#define PERFORMANCE_BOX_HEIGHT      (60U)", display)
+        self.assertIn("#define PERFORMANCE_KEY_Y           (23U)", display)
+        self.assertIn("#define PERFORMANCE_FLASH_MS        (250U)", display)
+        self.assertIn("draw_display_frame();", performance)
+        self.assertIn("if (performance_flash_active || performance_tag_active)",
+                      performance)
+        self.assertIn('ssd1306_WriteString("BPM", Font_6x8, White)', performance)
+        self.assertIn("if (performance_mode == V3_KEY_MIDI_CLOCK)", performance)
+        self.assertIn("Tempo is the active central value", performance)
+        self.assertIn("performance_flash_until = HAL_GetTick() + PERFORMANCE_FLASH_MS", display)
+        self.assertIn("performance_flash_active = 0U", display)
+        self.assertIn("switch_current_page);", router)
+        self.assertIn('ssd1306_WriteString("CC", Font_6x8, White)', display)
+        self.assertIn("for (uint8_t percent = 20U; percent < 100U; percent += 20U)",
+                      display)
+        self.assertIn("ssd1306_Line(x + 1U, y, x + 4U, y, White)", display)
+        self.assertIn("#define LEFT_COLUMN_DIVIDER_X        (28U)", display)
+        self.assertIn("ssd1306_Line(LEFT_COLUMN_DIVIDER_X, 2, LEFT_COLUMN_DIVIDER_X, 62, White)",
+                      display)
+        self.assertIn("#define EXP_FILL_TOP                 (6U)", display)
+        self.assertIn("#define EXP_FILL_BOTTOM              (60U)", display)
+        self.assertIn("#define EXP_FILL_HEIGHT              (55U)", display)
+        self.assertIn("2px outer contour and 1px inner contour", display)
+        self.assertIn("performance_flash_active || performance_tag_active", display)
+        self.assertIn("performance_tag_active = tag_on ? 1U : 0U", display)
+        self.assertIn("performance_flash_active = (is_tag && !tag_on) ? 0U : 1U", display)
+        self.assertIn("key->toggle,", router)
+        self.assertIn("key->toggle && toggle_state", router)
+        self.assertIn("ssd1306_Line(0, 20, 127, 20, White)", display)
+        self.assertIn("uint8_t y = 22U + line * 8U", display)
+        self.assertNotIn('"%u.%02uV"', display)
+
+    def test_oled_uses_a_128x64_logical_viewport_without_page_wrap(self):
+        config = (PROJECT / "firmware" / "Core" / "Inc" /
+                  "ssd1306_conf.h").read_text()
+        driver = (PROJECT / "firmware" / "Middlewares" /
+                  "stm32-ssd1306-master" / "ssd1306" /
+                  "ssd1306.c").read_text()
+        self.assertIn("#define SSD1306_WIDTH           128", config)
+        self.assertIn("#define SSD1306_COLUMN_OFFSET   2", config)
+        self.assertIn("memcpy(line_tx_buffer + 6, &SSD1306_Buffer[SSD1306_WIDTH*line], SSD1306_WIDTH)",
+                      driver)
+        self.assertIn("line_tx_buffer[2] = SSD1306_COLUMN_OFFSET & 0x0F", driver)
+
+    def test_settings_cursor_stays_on_the_centre_visible_line(self):
+        display = (PROJECT / "firmware" / "Core" / "Src" / "display.c").read_text()
+        self.assertIn("#define SETTINGS_VISIBLE_ROWS       (5U)", display)
+        self.assertIn("#define SETTINGS_CURSOR_LINE        (2U)", display)
+        self.assertIn("selected_row - SETTINGS_CURSOR_LINE : 0U", display)
+        self.assertIn("const uint8_t last_first_row = 32U - SETTINGS_VISIBLE_ROWS", display)
+        self.assertIn("const uint8_t first_row = settings_first_visible_row(selected_row)",
+                      display)
 
     def test_boot_screen_is_clean_single_line_v3_brand(self):
         header = (PROJECT / "firmware" / "Core" / "Inc" / "main.h").read_text()
