@@ -1,6 +1,20 @@
-# uLi MIDI Mod v3
+# MeloAudio MIDI Commander — uLi MIDI Mod v3
 
-這是 MeloAudio MIDI Commander 的 V3 穩定版韌體。V3 以未修改的上游 custom firmware commit `c03e265` 為基準，只保留 CUS1、CUS2、十顆可設定按鍵，以及本專案已確認需要的穩定性修正。
+> MeloAudio MIDI Commander 的 V3 穩定版自訂韌體
+
+V3 以未修改的上游 custom firmware commit `c03e265` 為基準，只保留 CUS1、CUS2、十顆可設定按鍵，以及本專案已確認需要的穩定性修正。
+
+<p align="center">
+  <img src="docs/images/meloaudio-midi-commander.jpg" alt="MeloAudio MIDI Commander MIDI 腳踏控制器" width="640">
+</p>
+
+<p align="center"><sub>MeloAudio MIDI Commander USB／DIN MIDI 腳踏控制器</sub></p>
+
+## 硬體概覽
+
+MeloAudio MIDI Commander 是一台可用腳操作的 MIDI 控制器：十顆腳踏開關用來送出 MIDI 指令，中央螢幕用於顯示目前模式與設定。它可透過 USB 或 DIN MIDI 連接電腦、效果器、音訊介面與其他可接收 MIDI 的設備，並提供兩個 expression pedal 輸入，可控制音量、wah 或其他連續參數。
+
+本專案的 V3 韌體適用於此硬體平台，提供 CUS1／CUS2 兩組各十鍵的可設定控制、USB 與 DIN MIDI 輸出，以及電池與充電模式支援。產品圖來源：[Rockin' Online Store](https://en.rockin.co.jp/shop/archives/115745.html)。
 
 ## 穩定版
 
